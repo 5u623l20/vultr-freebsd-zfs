@@ -1,0 +1,157 @@
+#!/bin/sh
+# set -x # In case you want to see what  actually I am doing
+################################################################################
+############################ CHANGE THE FOLLOWING ##############################
+################################################################################
+BSD_ARCH="amd64"
+BSD_VERSION="13.0"
+# Possible distributions
+# base-dbg.txz kernel-dbg.txz lib32-dbg.txz lib32.txz ports.txz src.txz tests.txz
+DISTRIBUTIONS="base.txz kernel.txz"; export DISTRIBUTIONS
+HOSTNAME="FreeBSD"
+PASSWORD="FreeBSD"
+# These ports are  installed by Vultr. If you want to add more just keep on adding
+PKGNG="ca_root_nss libnghttp2 libssh2 python wget"
+SIZE_GB=4
+SIZE_SWAP=0         # Change size in GB. o to disable
+SSH_KEY="<INSERT YOUR SSH KEY>"
+TIMEZONE=UTC
+################################################################################
+########################  DO NOT CHANGE THE FOLLOWING ##########################
+################################################################################
+DISTDIR=distdir-${BSD_VERSION}-${BSD_ARCH}
+IMAGENAME=FreeBSD-${BSD_VERSION}-RELEASE-${BSD_ARCH}.raw
+MD_NUMBER=79
+MIRROR="https://download.freebsd.org/"
+PASSWORD_HASH=$(echo ${PASSWORD} | openssl passwd -6 -stdin)
+ZROOT="zroot"
+ZPOOL_DIR="${ZROOT}/"
+SYSRC="sysrc -f /mnt/${ZPOOL_DIR}etc/rc.conf"
+SYSCTL_CONF="/mnt/${ZPOOL_DIR}etc/sysctl.conf"
+
+##################################################################################
+# Create an empty image
+truncate -s ${SIZE_GB}G ${IMAGENAME}
+
+# Create metadevice:
+mdconfig -f ${IMAGENAME} -u${MD_NUMBER}
+
+# Partition metadevice
+gpart create -s gpt md${MD_NUMBER}
+gpart add -a 4k -s 512k -t freebsd-boot md${MD_NUMBER}
+gpart add -a 4k -t freebsd-zfs -l gpt_root md${MD_NUMBER}
+gpart bootcode -b /boot/pmbr -p /boot/gptzfsboot -i 1 md${MD_NUMBER}
+zpool create -f -o altroot=/mnt -o cachefile=/var/tmp/zpool.cache zroot /dev/md${MD_NUMBER}p2
+# These are for testing
+#zpool export zroot
+#zpool import -o altroot=/mnt -o cachefile=/var/tmp/zpool.cache zroot
+# a big thanks to this: https://calomel.org/zfs_freebsd_root_install.html
+zpool set bootfs=zroot zroot
+zpool set listsnapshots=on zroot
+zpool set autoreplace=on zroot
+zfs set checksum=fletcher4 zroot
+zfs set compression=lz4 zroot
+zfs set atime=off zroot
+zfs set copies=3 zroot
+if [ $SIZE_SWAP -ne 0 ]; then
+zfs create -V ${SIZE_SWAP}G zroot/swap
+zfs set org.freebsd:swap=on zroot/swap
+fi
+
+# Create distdir
+mkdir -p ${DISTDIR}
+
+# Fetch distfiles
+env BSDINSTALL_DISTDIR="$(pwd)"/${DISTDIR} BSDINSTALL_DISTSITE=${MIRROR}/releases/${BSD_ARCH}/${BSD_VERSION}-RELEASE bsdinstall distfetch
+
+# Extract distfiles
+env BSDINSTALL_CHROOT=/mnt/${ZPOOL_DIR} BSDINSTALL_DISTDIR="$(pwd)"/${DISTDIR} BSDINSTALL_DISTSITE=${MIRROR}/releases/${BSD_ARCH}/${BSD_VERSION}-RELEASE bsdinstall distextract
+
+# Post-installation config by bsdinstall
+env BSDINSTALL_CHROOT=/mnt/${ZPOOL_DIR} BSDINSTALL_DISTDIR="$(pwd)"/${DISTDIR} BSDINSTALL_DISTSITE=${MIRROR}/releases/${BSD_ARCH}/${BSD_VERSION}-RELEASE bsdinstall config
+
+# Common Settings
+# Set Hostname
+${SYSRC} hostname="${HOSTNAME}"
+
+# Interface Settings
+# IPv4
+${SYSRC} ifconfig_vtnet0="DHCP -tso"
+
+# IPv6
+${SYSRC} ifconfig_vtnet0_ipv6="inet6 accept_rtadv -rxcsum -tso"
+${SYSRC} ipv6_activate_all_interfaces="YES"
+${SYSRC} rtsold_enable="YES"
+${SYSRC} rtsold_flags="-aF"
+${SYSRC} static_routes="linklocal"
+
+# Set CMOS clock
+touch /mnt/${ZPOOL_DIR}etc/wall_cmos_clock
+
+# Set TimeZone
+cp /mnt/${ZPOOL_DIR}usr/share/zoneinfo/${TIMEZONE} /mnt/${ZPOOL_DIR}etc/localtime
+
+# Setup SSH
+${SYSRC} sshd_enable="YES"
+${SYSRC} sshd_flags="-o PermitRootLogin==without-password"
+mkdir -p /mnt/${ZPOOL_DIR}/root/.ssh
+echo "${SSH_KEY}" > /mnt/${ZPOOL_DIR}/root/.ssh/authorized_keys
+
+# Set root password
+echo "${PASSWORD_HASH}" | chroot /mnt/${ZPOOL_DIR} pw usermod root -H 0
+
+# Set some common values for vultr
+${SYSRC} ntpd_enable="YES"
+${SYSRC} devmatch_blacklist="virtio_random.ko"
+${SYSRC} sendmail_enable="NONE"
+${SYSRC} syslogd_flags="-ss"
+
+{
+  echo "kern.ipc.maxsockbuf=67108864"
+  echo "net.inet.tcp.sendbuf_max=67108864"
+  echo "net.inet.tcp.recvbuf_max=67108864"
+  echo "net.inet.tcp.sendbuf_auto=1"
+  echo "net.inet.tcp.recvbuf_auto=1"
+  echo "net.inet.tcp.sendbuf_inc=16384"
+  echo "#net.inet.tcp.recvbuf_inc=524288"
+  echo "#net.inet.tcp.cc.algorithm=htcp"
+} >> ${SYSCTL_CONF}
+
+# Create resolve.conf for pkg installation
+echo 'nameserver 9.9.9.9' >> /mnt/${ZPOOL_DIR}/etc/resolv.conf
+
+# pkg bootstrap
+if [ -z "${PKGNG}" ]; then
+chroot /mnt/${ZPOOL_DIR} pkg bootstrap -y
+else
+pkg -c /mnt/${ZPOOL_DIR} install -y ${PKGNG}
+fi
+# Delete resolve.conf after pkg installation
+rm /mnt/${ZPOOL_DIR}/etc/resolv.conf
+
+# Setup zfs booting
+${SYSRC} zfs_enable="YES"
+cp /var/tmp/zpool.cache /mnt/${ZPOOL_DIR}/boot/zfs/zpool.cache
+cd /mnt/${ZPOOL_DIR} || exit ; ln -s usr/home home
+{
+  echo 'vfs.root.mountfrom="zfs:zroot"'
+  echo 'kern.geom.label.disk_ident.enable="0"'
+  echo 'kern.geom.label.gpt.enable="1"'
+  echo 'kern.geom.label.gptid.enable="0"'
+  echo 'cryptodev_load="YES"'
+  echo 'zfs_load="YES"'
+} > /mnt/${ZPOOL_DIR}/boot/loader.conf
+rm -f /mnt/${ZPOOL_DIR}/etc/fstab
+touch /mnt/${ZPOOL_DIR}/etc/fstab
+
+# Unmount the zfs filesystem before packaging
+# To reimport I'd zpool import -o altroot=/mnt [the numeric id] or zroot
+sleep 30 # Give it some time replenish it's sync
+zpool export -f zroot
+
+# Delete the metadevice
+mdconfig -d -u${MD_NUMBER}
+
+echo "Enjoy the image $IMAGENAME"
+
+# vim: ft=sh:
