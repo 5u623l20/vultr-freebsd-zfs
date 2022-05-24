@@ -4,7 +4,7 @@
 ############################ CHANGE THE FOLLOWING ##############################
 ################################################################################
 BSD_ARCH="amd64"
-BSD_VERSION="13.0"
+BSD_VERSION="13.1"
 # Possible distributions
 # base-dbg.txz kernel-dbg.txz lib32-dbg.txz lib32.txz ports.txz src.txz tests.txz
 DISTRIBUTIONS="base.txz kernel.txz"; export DISTRIBUTIONS
@@ -93,7 +93,7 @@ cp /mnt/${ZPOOL_DIR}usr/share/zoneinfo/${TIMEZONE} /mnt/${ZPOOL_DIR}etc/localtim
 
 # Setup SSH
 ${SYSRC} sshd_enable="YES"
-${SYSRC} sshd_flags="-o PermitRootLogin==without-password"
+${SYSRC} sshd_flags="-o PermitRootLogin=without-password"
 mkdir -p /mnt/${ZPOOL_DIR}/root/.ssh
 echo "${SSH_KEY}" > /mnt/${ZPOOL_DIR}/root/.ssh/authorized_keys
 
