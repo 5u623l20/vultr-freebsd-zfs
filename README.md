@@ -1,6 +1,10 @@
 # FreeBSD ZFS Image for Vultr
 
-This script generates FreeBSD zfs image for [Vultr](https://vultr.com). This script must be run in a FreeBSD system which is running on UFS or do not have a zpool named `zroot`. The script is self explanatory. Just change your `PASSWORD` and `SSH_KEY`.
+This script generates FreeBSD zfs image for [Vultr](https://vultr.com).
+
+☣️ This script must be run in a FreeBSD system which is running on UFS or do not have a zpool named `zroot`.
+
+The script is self explanatory. Just change your `PASSWORD` and `SSH_KEY`.
 
 Once the image is created:
 1. Host the image in a webserver
